@@ -95,6 +95,51 @@ def test_too_many_units_raises():
         core.cut(bar, axis="x", cell=0, count=3)
 
 
+def test_cut_z_removes_exact_section():
+    # A tall straight-walled bar: any horizontal section welds cleanly.
+    bar = trimesh.creation.box(extents=(41.5, 41.5, 100.0))
+    bar.apply_translation(-bar.bounds[0])
+    before = bar.bounds[1][2] - bar.bounds[0][2]
+    result = core.cut_z(bar, 30.0, 50.0, weld=True)
+    after = result.bounds[1][2] - result.bounds[0][2]
+    assert before - after == pytest.approx(20.0, abs=1e-6)
+    assert result.is_watertight
+    assert result.volume < bar.volume
+
+
+def test_cut_z_accepts_unordered_heights():
+    bar = trimesh.creation.box(extents=(20.0, 20.0, 60.0))
+    bar.apply_translation(-bar.bounds[0])
+    a = core.cut_z(bar, 40.0, 10.0)
+    b = core.cut_z(bar, 10.0, 40.0)
+    span_a = a.bounds[1][2] - a.bounds[0][2]
+    span_b = b.bounds[1][2] - b.bounds[0][2]
+    assert span_a == pytest.approx(span_b, abs=1e-6)
+    assert span_a == pytest.approx(30.0, abs=1e-6)
+
+
+def test_cut_z_volume_drops_by_section_for_uniform_bar():
+    bar = trimesh.creation.box(extents=(30.0, 25.0, 80.0))
+    bar.apply_translation(-bar.bounds[0])
+    result = core.cut_z(bar, 20.0, 35.0, weld=True)
+    section_volume = 30.0 * 25.0 * 15.0
+    assert bar.volume - result.volume == pytest.approx(section_volume, rel=1e-3)
+
+
+def test_cut_z_equal_heights_raise():
+    bar = trimesh.creation.box(extents=(20.0, 20.0, 40.0))
+    bar.apply_translation(-bar.bounds[0])
+    with pytest.raises(ValueError):
+        core.cut_z(bar, 10.0, 10.0)
+
+
+def test_cut_z_out_of_bounds_raises():
+    bar = trimesh.creation.box(extents=(20.0, 20.0, 40.0))
+    bar.apply_translation(-bar.bounds[0])
+    with pytest.raises(ValueError):
+        core.cut_z(bar, 10.0, 60.0)
+
+
 def test_y_axis_cut():
     bar = make_bar(2)  # 2 on X
     bar_y = bar.copy()

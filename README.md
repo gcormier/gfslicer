@@ -38,6 +38,9 @@ uv run gridfinity-slicer cut bin.stl --axis x --cell 1 --count 1 -o bin_smaller.
 
 # Remove two cells along Y
 uv run gridfinity-slicer cut bin.3mf -a y -c 0 -n 2
+
+# Remove an arbitrary Z section between 25 mm and 55 mm and weld the rest
+uv run gridfinity-slicer cutz bin.stl --from 25 --to 55 -o bin_shorter.stl
 ```
 
 `cut` options:
@@ -50,7 +53,29 @@ uv run gridfinity-slicer cut bin.3mf -a y -c 0 -n 2
 | `-o, --output FILE` | output `.stl` or `.3mf` | derived from input |
 | `--no-weld` | concatenate instead of boolean-welding (faster fallback) | off |
 
+`cutz` options:
+
+| flag | meaning | default |
+|------|---------|---------|
+| `-f, --from MM` | lower Z height of the section to remove | required |
+| `-t, --to MM` | upper Z height of the section to remove | required |
+| `-o, --output FILE` | output `.stl` or `.3mf` | derived from input |
+| `--no-weld` | concatenate instead of boolean-welding (faster fallback) | off |
+
 Output format follows the output file's extension (`.stl` or `.3mf`).
+
+## Cutting along Z
+
+`cutz` removes the slab between two arbitrary Z heights and welds the upper
+piece down onto the lower one — handy for shortening the *height* of a bin
+(e.g. dropping a tall bin's wall) without re-modelling it. Unlike X/Y, Z is
+**not** tied to the 42 mm grid, so you give two absolute heights in millimetres.
+
+Because the geometry doesn't repeat on a fixed pitch in Z, pick two heights with
+matching cross-sections — typically anywhere in a straight-walled region — so the
+cut faces weld with no gap or overhang. Slicing the top clean off isn't the goal
+here (any printing slicer can split an object); `cutz` is for taking a slice out
+of the *middle* and gluing the ends back together.
 
 ## Web UI
 
@@ -58,8 +83,10 @@ Output format follows the output file's extension (`.stl` or `.3mf`).
 uv run gridfinity-slicer-web        # serves http://127.0.0.1:8000
 ```
 
-Upload an STL/3MF, see it rendered in 3D with the 42 mm slab to remove
-highlighted in red, pick axis / cell / count, then download the rejoined mesh.
+Upload an STL/3MF, see it rendered in 3D with the slab to remove highlighted in
+red, pick axis / cell / count, then download the rejoined mesh. Choose the **Z**
+axis to switch to a height-based cut: enter two Z heights and the slab between
+them is removed and welded back together.
 
 ## How a cut maps to cells
 

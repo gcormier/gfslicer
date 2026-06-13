@@ -51,6 +51,32 @@ def test_cut_3mf_roundtrip():
     assert not result.is_empty
 
 
+def tall_bar_bytes(height: float = 60.0, fmt: str = "stl") -> bytes:
+    box = trimesh.creation.box(extents=(41.5, 41.5, height))
+    box.apply_translation(-box.bounds[0])
+    buf = io.BytesIO()
+    box.export(buf, file_type=fmt)
+    return buf.getvalue()
+
+
+def test_cutz_downloads_shorter_mesh():
+    files = {"file": ("bar.stl", tall_bar_bytes(60.0), "model/stl")}
+    data = {"z_start": "20", "z_end": "35", "out_format": "stl"}
+    r = client.post("/cutz", files=files, data=data)
+    assert r.status_code == 200
+    assert r.headers["content-disposition"].endswith('bar_cutz_20-35.stl"')
+    result = trimesh.load(io.BytesIO(r.content), file_type="stl", force="mesh")
+    span = result.bounds[1][2] - result.bounds[0][2]
+    assert span == pytest.approx(45.0, abs=1e-3)
+
+
+def test_cutz_out_of_bounds_rejected():
+    files = {"file": ("bar.stl", tall_bar_bytes(40.0), "model/stl")}
+    data = {"z_start": "10", "z_end": "100", "out_format": "stl"}
+    r = client.post("/cutz", files=files, data=data)
+    assert r.status_code == 400
+
+
 def test_bad_axis_value_is_rejected():
     files = {"file": ("bar.stl", bar_bytes(2), "model/stl")}
     data = {"axis": "x", "cell": "5", "count": "1", "out_format": "stl"}

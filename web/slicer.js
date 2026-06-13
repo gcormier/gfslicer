@@ -97,6 +97,62 @@ function extractMesh(manifoldObj) {
   };
 }
 
+// Cut out the slab between absolute coords `start`..`end` along axis index `ax`
+// and weld the rest into one watertight solid. Shared by cutPositions (X/Y,
+// grid-aligned) and cutZPositions (arbitrary Z). `solid`, `size` and `cleanup`
+// are owned by the caller; every WASM object created here is pushed onto
+// `cleanup` for the caller to free.
+function weldSlab(wasm, solid, ax, start, end, size, cleanup) {
+  const width = end - start;
+
+  const leftNormal = [0, 0, 0]; leftNormal[ax] = -1;   // keep <= start
+  const rightNormal = [0, 0, 0]; rightNormal[ax] = 1;  // keep >= end
+  const left = solid.trimByPlane(leftNormal, -start);
+  const right = solid.trimByPlane(rightNormal, end);
+  cleanup.push(left, right);
+
+  const leftEmpty = left.isEmpty();
+  const rightEmpty = right.isEmpty();
+  if (leftEmpty && rightEmpty) {
+    throw new Error("slice produced no geometry -- check the cut bounds");
+  }
+
+  // A plane on the mesh boundary leaves a single piece; just shift it
+  // (no weld, so no seam overlap needed).
+  if (leftEmpty || rightEmpty) {
+    if (rightEmpty) {
+      // left already spans [lo, start]; nothing to slide.
+      return extractMesh(left);
+    }
+    // left empty (cut reaches the bottom): slide the surviving far piece back.
+    const shift = [0, 0, 0]; shift[ax] = -width;
+    const moved = right.translate(shift);
+    cleanup.push(moved);
+    return extractMesh(moved);
+  }
+
+  // Both pieces present: weld them. Coincident cut faces make manifold leave
+  // two touching shells (genus -1) instead of one solid, so we need a small
+  // overlap at the seam. We get it by extending the NEAR piece by `eps` into
+  // the removed slab while sliding the far piece back by exactly `width`. As
+  // long as the two cut faces share a cross-section (guaranteed on the 42 mm
+  // grid for X/Y; the caller's responsibility for arbitrary Z) the overlap
+  // region fuses cleanly -- and because only the near piece grows (the far
+  // extent is untouched), the overall dimension stays exact. `eps` is
+  // bbox-relative, comfortably above manifold's precision floor (~bbox*1e-7).
+  const eps = Math.max(size[0], size[1], size[2]) * 1e-6;
+  const leftWeld = solid.trimByPlane(leftNormal, -(start + eps));
+  cleanup.push(leftWeld);
+  const shift = [0, 0, 0]; shift[ax] = -width;
+  const moved = right.translate(shift);
+  cleanup.push(moved);
+
+  const joined = wasm.Manifold.union(leftWeld, moved);
+  cleanup.push(joined);
+  if (joined.isEmpty()) throw new Error("weld produced an empty mesh");
+  return extractMesh(joined);
+}
+
 // Remove `count` 42 mm cells starting at `cell` along `axis` and weld the rest
 // into a single watertight solid. Mirrors core.cut. Returns a manifold Mesh
 // ({ numProp, vertProperties, triVerts }) ready for STL export.
@@ -130,54 +186,45 @@ export function cutPositions(positions, axis, cell, count = 1) {
 
     const start = lo[ax] + cell * GRID;
     const end = start + count * GRID;
-    const width = end - start;
-
-    const leftNormal = [0, 0, 0]; leftNormal[ax] = -1;   // keep <= start
-    const rightNormal = [0, 0, 0]; rightNormal[ax] = 1;  // keep >= end
-    let left = solid.trimByPlane(leftNormal, -start);
-    let right = solid.trimByPlane(rightNormal, end);
-    cleanup.push(left, right);
-
-    const leftEmpty = left.isEmpty();
-    const rightEmpty = right.isEmpty();
-    if (leftEmpty && rightEmpty) {
-      throw new Error("slice produced no geometry -- check axis/cell/count");
+    return weldSlab(wasm, solid, ax, start, end, size, cleanup);
+  } finally {
+    for (const obj of cleanup) {
+      try { obj.delete && obj.delete(); } catch { /* already freed */ }
     }
+  }
+}
 
-    // Removing the first or last cell leaves a single piece; just shift it
-    // (no weld, so no seam overlap needed).
-    if (leftEmpty || rightEmpty) {
-      if (rightEmpty) {
-        // left already spans [lo, start]; nothing to slide.
-        return extractMesh(left);
-      }
-      // left empty (removed the first cell): slide the surviving far piece back.
-      const shift = [0, 0, 0]; shift[ax] = -width;
-      const moved = right.translate(shift);
-      cleanup.push(moved);
-      return extractMesh(moved);
+// Remove the Z section between `zStart` and `zEnd` (arbitrary absolute heights,
+// not tied to the 42 mm grid) and weld the rest. Mirrors core.cut_z. The caller
+// must pick heights with matching cross-sections for a clean weld. Returns a
+// manifold Mesh ready for STL export.
+//
+// initManifold() must have resolved first.
+export function cutZPositions(positions, zStart, zEnd) {
+  const wasm = _wasm;
+  if (!wasm) throw new Error("manifold not initialised — await initManifold() first");
+
+  const ax = 2; // Z
+  let start = Number(zStart);
+  let end = Number(zEnd);
+  if (end < start) [start, end] = [end, start];
+  if (!(end - start > 0)) throw new Error("the two Z heights must differ");
+
+  const solid = manifoldFromPositions(wasm, positions);
+  const cleanup = [solid];
+
+  try {
+    const box = solid.boundingBox();
+    const lo = box.min, hi = box.max;
+    const size = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+    const tol = 1e-6;
+    if (start < lo[ax] - tol || end > hi[ax] + tol) {
+      throw new Error(
+        `Z section ${start.toFixed(3)}..${end.toFixed(3)} mm lies outside the ` +
+        `mesh (Z spans ${lo[ax].toFixed(3)}..${hi[ax].toFixed(3)} mm)`
+      );
     }
-
-    // Both pieces present: weld them. Coincident cut faces make manifold leave
-    // two touching shells (genus -1) instead of one solid, so we need a small
-    // overlap at the seam. We get it by extending the NEAR piece by `eps` into
-    // the removed slab while sliding the far piece back by exactly `width`. The
-    // seam spacing is a whole multiple of 42 mm, so the overlap region has
-    // identical cross-sections and fuses cleanly -- and because only the near
-    // piece grows (the far extent is untouched), the overall dimension stays
-    // exact. `eps` is bbox-relative, comfortably above manifold's precision
-    // floor (~bbox*1e-7).
-    const eps = Math.max(size[0], size[1], size[2]) * 1e-6;
-    const leftWeld = solid.trimByPlane(leftNormal, -(start + eps));
-    cleanup.push(leftWeld);
-    const shift = [0, 0, 0]; shift[ax] = -width;
-    const moved = right.translate(shift);
-    cleanup.push(moved);
-
-    const joined = wasm.Manifold.union(leftWeld, moved);
-    cleanup.push(joined);
-    if (joined.isEmpty()) throw new Error("weld produced an empty mesh");
-    return extractMesh(joined);
+    return weldSlab(wasm, solid, ax, start, end, size, cleanup);
   } finally {
     for (const obj of cleanup) {
       try { obj.delete && obj.delete(); } catch { /* already freed */ }

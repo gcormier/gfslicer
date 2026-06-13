@@ -54,16 +54,35 @@
       <div class="seg" id="axisSeg">
         <button data-axis="x" class="on">X</button>
         <button data-axis="y">Y</button>
+        <button data-axis="z">Z</button>
       </div>
-      <div class="row">
-        <div>
-          <label>First cell to remove</label>
-          <input id="cell" type="number" min="0" value="0">
+      <div id="xyInputs">
+        <div class="row">
+          <div>
+            <label>First cell to remove</label>
+            <input id="cell" type="number" min="0" value="0">
+          </div>
+          <div>
+            <label>Number of cells</label>
+            <input id="count" type="number" min="1" value="1">
+          </div>
         </div>
-        <div>
-          <label>Number of cells</label>
-          <input id="count" type="number" min="1" value="1">
+      </div>
+      <div id="zInputs" style="display:none;">
+        <div class="row">
+          <div>
+            <label>From Z (mm)</label>
+            <input id="zStart" type="number" step="0.1" value="0">
+          </div>
+          <div>
+            <label>To Z (mm)</label>
+            <input id="zEnd" type="number" step="0.1" value="0">
+          </div>
         </div>
+        <p style="font-size:11px;color:#9aa0ac;margin:6px 0 0;">
+          Removes everything between these two heights and welds the rest. Pick
+          heights with matching cross-sections (e.g. a straight-walled region).
+        </p>
       </div>
       <div class="legend">
         <span><span class="swatch" style="background:#9499a3"></span>keep</span>
@@ -84,7 +103,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
-import { initManifold, inspectPositions, describe, cutPositions, GRID } from './slicer.js';
+import { initManifold, inspectPositions, describe, cutPositions, cutZPositions, GRID } from './slicer.js';
 import { meshToBinarySTL } from './stl.js';
 
 const vp = document.getElementById('viewport');
@@ -143,9 +162,21 @@ function showMesh(geometry) {
 function updateSlab() {
   if (slab) { scene.remove(slab); slab = null; }
   if (!meta) return;
+  const min = meta.min, size = meta.size;
+  const m = new THREE.MeshStandardMaterial({ color: 0xf87171, transparent: true, opacity: 0.5 });
+  if (axis === 'z') {
+    let z0 = +document.getElementById('zStart').value;
+    let z1 = +document.getElementById('zEnd').value;
+    if (z1 < z0) [z0, z1] = [z1, z0];
+    const height = Math.max(0, z1 - z0);
+    const g = new THREE.BoxGeometry(size.x * 1.02, size.y * 1.02, height || 1e-3);
+    slab = new THREE.Mesh(g, m);
+    slab.position.set(min.x + size.x/2, min.y + size.y/2, z0 + height/2);
+    scene.add(slab);
+    return;
+  }
   const cell = +document.getElementById('cell').value;
   const count = Math.max(1, +document.getElementById('count').value);
-  const min = meta.min, size = meta.size;
   const start = min[axis] + cell * GRID;
   const width = count * GRID;
   const g = new THREE.BoxGeometry(
@@ -153,7 +184,6 @@ function updateSlab() {
     axis === 'y' ? width : size.y,
     size.z * 1.02
   );
-  const m = new THREE.MeshStandardMaterial({ color: 0xf87171, transparent: true, opacity: 0.5 });
   slab = new THREE.Mesh(g, m);
   slab.position.set(
     axis === 'x' ? start + width/2 : min.x + size.x/2,
@@ -188,17 +218,42 @@ document.getElementById('file').addEventListener('change', async (e) => {
   clampInputs();
 });
 
-['cell','count'].forEach(id =>
+['cell','count','zStart','zEnd'].forEach(id =>
   document.getElementById(id).addEventListener('input', () => { clampInputs(); updateSlab(); }));
 
 document.querySelectorAll('#axisSeg button').forEach(b =>
   b.addEventListener('click', () => {
     document.querySelectorAll('#axisSeg button').forEach(x => x.classList.remove('on'));
-    b.classList.add('on'); axis = b.dataset.axis; clampInputs(); updateSlab();
+    b.classList.add('on'); axis = b.dataset.axis;
+    const z = axis === 'z';
+    document.getElementById('xyInputs').style.display = z ? 'none' : '';
+    document.getElementById('zInputs').style.display = z ? '' : 'none';
+    if (z) initZDefaults();
+    clampInputs(); updateSlab();
   }));
+
+// Seed the Z fields with sensible interior heights the first time Z is chosen.
+function initZDefaults() {
+  if (!meta) return;
+  const zEl = document.getElementById('zStart'), zEl2 = document.getElementById('zEnd');
+  if (+zEl.value === 0 && +zEl2.value === 0) {
+    const lo = meta.min.z, h = meta.size.z;
+    zEl.value = (lo + h/3).toFixed(2);
+    zEl2.value = (lo + 2*h/3).toFixed(2);
+  }
+}
 
 function clampInputs() {
   if (!meta) return;
+  if (axis === 'z') {
+    const lo = meta.min.z, hi = meta.min.z + meta.size.z;
+    const zEl = document.getElementById('zStart'), zEl2 = document.getElementById('zEnd');
+    zEl.min = lo.toFixed(2); zEl.max = hi.toFixed(2);
+    zEl2.min = lo.toFixed(2); zEl2.max = hi.toFixed(2);
+    zEl.value = Math.min(Math.max(lo, +zEl.value), hi);
+    zEl2.value = Math.min(Math.max(lo, +zEl2.value), hi);
+    return;
+  }
   const total = meta.units[axis];
   const countEl = document.getElementById('count'), cellEl = document.getElementById('cell');
   let count = Math.min(Math.max(1, +countEl.value), total);
@@ -210,19 +265,29 @@ function clampInputs() {
 document.getElementById('go').addEventListener('click', async () => {
   if (!positions) return;
   const go = document.getElementById('go');
-  const cell = +document.getElementById('cell').value;
-  const count = +document.getElementById('count').value;
   setErr('');
   go.disabled = true; const label = go.textContent; go.textContent = 'Welding…';
   try {
     await manifoldReady;
-    const mesh = cutPositions(positions, axis, cell, count);
+    const stem = fileName.replace(/\.[^.]+$/, '');
+    let mesh, name;
+    if (axis === 'z') {
+      const z0 = +document.getElementById('zStart').value;
+      const z1 = +document.getElementById('zEnd').value;
+      mesh = cutZPositions(positions, z0, z1);
+      const [lo, hi] = z0 <= z1 ? [z0, z1] : [z1, z0];
+      name = `${stem}_cutz_${lo}-${hi}.stl`;
+    } else {
+      const cell = +document.getElementById('cell').value;
+      const count = +document.getElementById('count').value;
+      mesh = cutPositions(positions, axis, cell, count);
+      name = `${stem}_cut_${axis}${cell}x${count}.stl`;
+    }
     const stl = meshToBinarySTL(mesh.vertProperties, mesh.triVerts);
     const blob = new Blob([stl], { type: 'model/stl' });
-    const stem = fileName.replace(/\.[^.]+$/, '');
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `${stem}_cut_${axis}${cell}x${count}.stl`;
+    a.download = name;
     a.click(); URL.revokeObjectURL(a.href);
   } catch (err) {
     setErr(String(err && err.message ? err.message : err));

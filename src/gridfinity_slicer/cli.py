@@ -44,6 +44,35 @@ def _cmd_cut(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_cutz(args: argparse.Namespace) -> int:
+    mesh = core.load_mesh(args.input)
+
+    if args.output:
+        out = Path(args.output)
+    else:
+        p = Path(args.input)
+        stem = f"{p.stem}_cutz_{args.from_z:g}-{args.to_z:g}"
+        out = p.with_name(stem + p.suffix)
+
+    result = core.cut_z(
+        mesh,
+        z_start=args.from_z,
+        z_end=args.to_z,
+        weld=not args.no_weld,
+    )
+
+    core.export_mesh(result, out)
+
+    lo, hi = sorted((args.from_z, args.to_z))
+    removed = hi - lo
+    before = mesh.bounds[1][2] - mesh.bounds[0][2]
+    print(f"Removed {removed:.2f} mm Z section ({lo:.2f} -> {hi:.2f} mm).")
+    print(f"Z height: {before:.2f} -> {before - removed:.2f} mm")
+    print(f"Watertight result: {result.is_watertight}")
+    print(f"Wrote {out}")
+    return 0
+
+
 def _default_output(input_path: str, args: argparse.Namespace) -> Path:
     p = Path(input_path)
     stem = f"{p.stem}_cut_{args.axis}{args.cell}x{args.count}"
@@ -73,6 +102,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_cut.add_argument("--no-weld", action="store_true",
                        help="concatenate the pieces instead of boolean-welding them")
     p_cut.set_defaults(func=_cmd_cut)
+
+    p_cutz = sub.add_parser(
+        "cutz",
+        help="remove an arbitrary Z section (two heights) and rejoin",
+    )
+    p_cutz.add_argument("input", help="input STL or 3MF file")
+    p_cutz.add_argument("-f", "--from", dest="from_z", type=float, required=True,
+                        help="lower Z height (mm) of the section to remove")
+    p_cutz.add_argument("-t", "--to", dest="to_z", type=float, required=True,
+                        help="upper Z height (mm) of the section to remove")
+    p_cutz.add_argument("-o", "--output", help="output file (.stl or .3mf); default derives from input")
+    p_cutz.add_argument("--no-weld", action="store_true",
+                        help="concatenate the pieces instead of boolean-welding them")
+    p_cutz.set_defaults(func=_cmd_cutz)
 
     return parser
 

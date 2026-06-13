@@ -100,6 +100,44 @@ async def cut_endpoint(
     )
 
 
+@app.post("/cutz")
+async def cutz_endpoint(
+    file: UploadFile,
+    z_start: float = Form(...),
+    z_end: float = Form(...),
+    out_format: str = Form("stl"),
+    weld: bool = Form(True),
+) -> Response:
+    data = await file.read()
+    mesh = _load_upload(data, file.filename or "upload")
+    try:
+        result = core.cut_z(mesh, z_start=z_start, z_end=z_end, weld=weld)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    fmt = out_format.lower()
+    if fmt not in {"stl", "3mf"}:
+        raise HTTPException(400, "out_format must be stl or 3mf")
+
+    with tempfile.NamedTemporaryFile(suffix=f".{fmt}", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        result.export(tmp_path)
+        payload = tmp_path.read_bytes()
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    lo, hi = sorted((z_start, z_end))
+    stem = Path(file.filename or "model").stem
+    out_name = f"{stem}_cutz_{lo:g}-{hi:g}.{fmt}"
+    media = "model/3mf" if fmt == "3mf" else "model/stl"
+    return Response(
+        content=payload,
+        media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{out_name}"'},
+    )
+
+
 def main() -> None:
     import uvicorn
 
@@ -162,16 +200,35 @@ INDEX_HTML = """<!doctype html>
       <div class="seg" id="axisSeg">
         <button data-axis="x" class="on">X</button>
         <button data-axis="y">Y</button>
+        <button data-axis="z">Z</button>
       </div>
-      <div class="row">
-        <div>
-          <label>First cell to remove</label>
-          <input id="cell" type="number" min="0" value="0">
+      <div id="xyInputs">
+        <div class="row">
+          <div>
+            <label>First cell to remove</label>
+            <input id="cell" type="number" min="0" value="0">
+          </div>
+          <div>
+            <label>Number of cells</label>
+            <input id="count" type="number" min="1" value="1">
+          </div>
         </div>
-        <div>
-          <label>Number of cells</label>
-          <input id="count" type="number" min="1" value="1">
+      </div>
+      <div id="zInputs" style="display:none;">
+        <div class="row">
+          <div>
+            <label>From Z (mm)</label>
+            <input id="zStart" type="number" step="0.1" value="0">
+          </div>
+          <div>
+            <label>To Z (mm)</label>
+            <input id="zEnd" type="number" step="0.1" value="0">
+          </div>
         </div>
+        <p style="font-size:11px;color:#9aa0ac;margin:6px 0 0;">
+          Removes everything between these two heights and welds the rest. Pick
+          heights with matching cross-sections (e.g. a straight-walled region).
+        </p>
       </div>
       <label>Output format</label>
       <select id="fmt"><option value="stl">STL</option><option value="3mf">3MF</option></select>
@@ -255,9 +312,21 @@ function showMesh(arrayBuffer, isThreeMF) {
 function updateSlab() {
   if (slab) { scene.remove(slab); slab = null; }
   if (!meta) return;
+  const min = meta.min, size = meta.size;
+  const m = new THREE.MeshStandardMaterial({ color: 0xf87171, transparent: true, opacity: 0.5 });
+  if (axis === 'z') {
+    let z0 = +document.getElementById('zStart').value;
+    let z1 = +document.getElementById('zEnd').value;
+    if (z1 < z0) [z0, z1] = [z1, z0];
+    const height = Math.max(0, z1 - z0);
+    const g = new THREE.BoxGeometry(size.x * 1.02, size.y * 1.02, height || 1e-3);
+    slab = new THREE.Mesh(g, m);
+    slab.position.set(min.x + size.x/2, min.y + size.y/2, z0 + height/2);
+    scene.add(slab);
+    return;
+  }
   const cell = +document.getElementById('cell').value;
   const count = Math.max(1, +document.getElementById('count').value);
-  const min = meta.min, size = meta.size;
   const start = min[axis] + cell * GRID;
   const width = count * GRID;
   const g = new THREE.BoxGeometry(
@@ -265,7 +334,6 @@ function updateSlab() {
     axis === 'y' ? width : size.y,
     size.z * 1.02
   );
-  const m = new THREE.MeshStandardMaterial({ color: 0xf87171, transparent: true, opacity: 0.5 });
   slab = new THREE.Mesh(g, m);
   slab.position.set(
     axis === 'x' ? start + width/2 : min.x + size.x/2,
@@ -298,17 +366,42 @@ document.getElementById('file').addEventListener('change', async (e) => {
   clampInputs();
 });
 
-['cell','count'].forEach(id =>
+['cell','count','zStart','zEnd'].forEach(id =>
   document.getElementById(id).addEventListener('input', () => { clampInputs(); updateSlab(); }));
 
 document.querySelectorAll('#axisSeg button').forEach(b =>
   b.addEventListener('click', () => {
     document.querySelectorAll('#axisSeg button').forEach(x => x.classList.remove('on'));
-    b.classList.add('on'); axis = b.dataset.axis; clampInputs(); updateSlab();
+    b.classList.add('on'); axis = b.dataset.axis;
+    const z = axis === 'z';
+    document.getElementById('xyInputs').style.display = z ? 'none' : '';
+    document.getElementById('zInputs').style.display = z ? '' : 'none';
+    if (z) initZDefaults();
+    clampInputs(); updateSlab();
   }));
+
+// Seed the Z fields with sensible interior heights the first time Z is chosen.
+function initZDefaults() {
+  if (!meta) return;
+  const zEl = document.getElementById('zStart'), zEl2 = document.getElementById('zEnd');
+  if (+zEl.value === 0 && +zEl2.value === 0) {
+    const lo = meta.min.z, h = meta.size.z;
+    zEl.value = (lo + h/3).toFixed(2);
+    zEl2.value = (lo + 2*h/3).toFixed(2);
+  }
+}
 
 function clampInputs() {
   if (!meta) return;
+  if (axis === 'z') {
+    const lo = meta.min.z, hi = meta.min.z + meta.size.z;
+    const zEl = document.getElementById('zStart'), zEl2 = document.getElementById('zEnd');
+    zEl.min = lo.toFixed(2); zEl.max = hi.toFixed(2);
+    zEl2.min = lo.toFixed(2); zEl2.max = hi.toFixed(2);
+    zEl.value = Math.min(Math.max(lo, +zEl.value), hi);
+    zEl2.value = Math.min(Math.max(lo, +zEl2.value), hi);
+    return;
+  }
   const total = meta.units[axis];
   const countEl = document.getElementById('count'), cellEl = document.getElementById('cell');
   let count = Math.min(Math.max(1, +countEl.value), total);
@@ -319,20 +412,29 @@ function clampInputs() {
 
 document.getElementById('go').addEventListener('click', async () => {
   if (!fileData) return;
+  const fmt = document.getElementById('fmt').value;
   const fd = new FormData();
   fd.append('file', new Blob([fileData]), fileName);
-  fd.append('axis', axis);
-  fd.append('cell', document.getElementById('cell').value);
-  fd.append('count', document.getElementById('count').value);
-  fd.append('out_format', document.getElementById('fmt').value);
+  fd.append('out_format', fmt);
+  let endpoint;
+  if (axis === 'z') {
+    endpoint = '/cutz';
+    fd.append('z_start', document.getElementById('zStart').value);
+    fd.append('z_end', document.getElementById('zEnd').value);
+  } else {
+    endpoint = '/cut';
+    fd.append('axis', axis);
+    fd.append('cell', document.getElementById('cell').value);
+    fd.append('count', document.getElementById('count').value);
+  }
   setErr('');
-  const res = await fetch('/cut', { method:'POST', body: fd });
+  const res = await fetch(endpoint, { method:'POST', body: fd });
   if (!res.ok) { return setErr((await res.json()).detail || 'cut failed'); }
   const blob = await res.blob();
   const dn = (res.headers.get('Content-Disposition')||'').match(/filename="(.+?)"/);
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = dn ? dn[1] : 'cut.' + document.getElementById('fmt').value;
+  a.download = dn ? dn[1] : 'cut.' + fmt;
   a.click(); URL.revokeObjectURL(a.href);
 });
 
