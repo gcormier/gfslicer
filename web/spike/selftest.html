@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>slicer.js self-test</title>
+<style>body{font-family:ui-monospace,monospace;background:#0e1014;color:#e6e6e6;padding:24px}
+#out{white-space:pre-wrap;font-size:13px;line-height:1.6}.pass{color:#4ade80}.fail{color:#f87171}.note{color:#9aa0ac}</style>
+</head>
+<body>
+<h1 style="font-size:16px">slicer.js + stl.js self-test</h1>
+<div id="out">running…</div>
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+import { initManifold, inspectPositions, cutPositions, GRID } from '../slicer.js';
+import { meshToBinarySTL } from '../stl.js';
+
+const out = document.getElementById('out');
+const lines = []; let failures = 0;
+function log(m, c=''){ lines.push(c?`<span class="${c}">${m}</span>`:m); out.innerHTML = lines.join('\n'); }
+function check(n, ok, d=''){ if(ok) log(`  PASS  ${n}  ${d}`,'pass'); else {failures++; log(`  FAIL  ${n}  ${d}`,'fail');} }
+const approx=(a,b,t)=>Math.abs(a-b)<=t;
+
+// Build STL-style triangle-soup positions from a valid manifold cube, so we feed
+// slicer.js exactly the kind of input an uploaded STL produces.
+function soupPositions(wasm, sx, sy, sz) {
+  const cube = wasm.Manifold.cube([sx, sy, sz]);
+  const m = cube.getMesh();
+  const nTri = m.triVerts.length / 3;
+  const pos = new Float32Array(nTri * 3 * 3);
+  for (let i = 0; i < nTri * 3; i++) {
+    const src = m.triVerts[i];
+    pos[i*3] = m.vertProperties[src*3];
+    pos[i*3+1] = m.vertProperties[src*3+1];
+    pos[i*3+2] = m.vertProperties[src*3+2];
+  }
+  cube.delete();
+  return pos;
+}
+
+// Rebuild a manifold from an indexed result mesh to inspect topology/volume.
+function asManifold(wasm, mesh) {
+  const mm = new wasm.Mesh({ numProp: 3, vertProperties: mesh.vertProperties, triVerts: mesh.triVerts });
+  mm.merge();
+  return new wasm.Manifold(mm);
+}
+
+try {
+  const wasm = await initManifold();
+  const FOOT = 41.5, H = 20, UNITS = 4, lenX = UNITS*GRID - (GRID-FOOT); // 167.5
+  const pos = soupPositions(wasm, lenX, FOOT, H);
+
+  log(`Input: uniform bar ${lenX} x ${FOOT} x ${H}, ${pos.length/3} soup verts\n`);
+
+  // --- inspectPositions ---
+  const info = inspectPositions(pos);
+  log('inspectPositions');
+  check('units.x = 4', info.units.x === 4, `(got ${info.units.x})`);
+  check('units.y = 1', info.units.y === 1, `(got ${info.units.y})`);
+  check('bbox width = 167.5', approx(info.size[0], lenX, 1e-3), `(got ${info.size[0].toFixed(3)})`);
+
+  // --- cutPositions: remove cell 1 (middle) ---
+  log('\ncutPositions(x, cell=1, count=1)');
+  const res = cutPositions(pos, 'x', 1, 1);
+  const man = asManifold(wasm, res);
+  const box = man.boundingBox();
+  const width = box.max[0] - box.min[0];
+  const cellVol = GRID*FOOT*H, fullVol = lenX*FOOT*H;
+  check('result genus 0 (single watertight solid)', man.genus() === 0, `(genus=${man.genus()})`);
+  check('removed ~42mm on X', approx(lenX - width, GRID, 1e-3), `(after=${width.toFixed(3)})`);
+  check('volume dropped ~one cell', approx(fullVol - man.volume(), cellVol, cellVol*1e-3),
+        `(drop=${(fullVol-man.volume()).toFixed(1)})`);
+  man.delete();
+
+  // --- STL round-trip: write -> re-parse -> re-inspect ---
+  log('\nstl.js round-trip (write -> STLLoader.parse -> inspect)');
+  const stl = meshToBinarySTL(res.vertProperties, res.triVerts);
+  const geo = new STLLoader().parse(stl.buffer);
+  const info2 = inspectPositions(geo.attributes.position.array);
+  check('round-tripped units.x = 3', info2.units.x === 3, `(got ${info2.units.x})`);
+  check('round-tripped width = 125.5', approx(info2.size[0], lenX-GRID, 1e-3), `(got ${info2.size[0].toFixed(3)})`);
+
+  // --- edge cases: first cell, last cell, validation errors ---
+  log('\nedge cases');
+  const first = asManifold(wasm, cutPositions(pos, 'x', 0, 1));
+  check('remove first cell -> genus 0', first.genus() === 0, `(genus=${first.genus()})`);
+  check('remove first cell -> width 125.5', approx(first.boundingBox().max[0]-first.boundingBox().min[0], lenX-GRID, 1e-3));
+  first.delete();
+  const last = asManifold(wasm, cutPositions(pos, 'x', 3, 1));
+  check('remove last cell -> genus 0', last.genus() === 0, `(genus=${last.genus()})`);
+  last.delete();
+  let threw=false; try { cutPositions(pos,'x',3,2); } catch { threw=true; }
+  check('cell out of range throws', threw);
+  threw=false; try { cutPositions(pos,'x',0,5); } catch { threw=true; }
+  check('count > units throws', threw);
+
+  log(`\n${failures===0?'ALL CHECKS PASSED ✅':failures+' CHECK(S) FAILED ❌'}`, failures===0?'pass':'fail');
+  window.__SELFTEST__ = { failures, done: true };
+} catch (err) {
+  log('\nSELFTEST ERROR: ' + (err && err.stack ? err.stack : err), 'fail');
+  window.__SELFTEST__ = { failures: -1, done: true, error: String(err) };
+}
+</script>
+</body>
+</html>
