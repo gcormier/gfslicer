@@ -73,6 +73,37 @@ def _cmd_cutz(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_stretchz(args: argparse.Namespace) -> int:
+    mesh = core.load_mesh(args.input)
+
+    if args.output:
+        out = Path(args.output)
+    else:
+        p = Path(args.input)
+        stem = f"{p.stem}_stretchz_{args.from_z:g}-{args.to_z:g}x{args.copies}"
+        out = p.with_name(stem + p.suffix)
+
+    result = core.stretch_z(
+        mesh,
+        z_start=args.from_z,
+        z_end=args.to_z,
+        copies=args.copies,
+        weld=not args.no_weld,
+    )
+
+    core.export_mesh(result, out)
+
+    lo, hi = sorted((args.from_z, args.to_z))
+    added = (hi - lo) * args.copies
+    before = mesh.bounds[1][2] - mesh.bounds[0][2]
+    print(f"Inserted {args.copies} copy(ies) of the {hi - lo:.2f} mm section "
+          f"({lo:.2f} -> {hi:.2f} mm); added {added:.2f} mm.")
+    print(f"Z height: {before:.2f} -> {before + added:.2f} mm")
+    print(f"Watertight result: {result.is_watertight}")
+    print(f"Wrote {out}")
+    return 0
+
+
 def _default_output(input_path: str, args: argparse.Namespace) -> Path:
     p = Path(input_path)
     stem = f"{p.stem}_cut_{args.axis}{args.cell}x{args.count}"
@@ -116,6 +147,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_cutz.add_argument("--no-weld", action="store_true",
                         help="concatenate the pieces instead of boolean-welding them")
     p_cutz.set_defaults(func=_cmd_cutz)
+
+    p_stretchz = sub.add_parser(
+        "stretchz",
+        help="duplicate an arbitrary Z section to make the model taller",
+    )
+    p_stretchz.add_argument("input", help="input STL or 3MF file")
+    p_stretchz.add_argument("-f", "--from", dest="from_z", type=float, required=True,
+                            help="lower Z height (mm) of the section to duplicate")
+    p_stretchz.add_argument("-t", "--to", dest="to_z", type=float, required=True,
+                            help="upper Z height (mm) of the section to duplicate")
+    p_stretchz.add_argument("-n", "--copies", type=int, default=1,
+                            help="number of extra copies of the section to insert (default: 1)")
+    p_stretchz.add_argument("-o", "--output", help="output file (.stl or .3mf); default derives from input")
+    p_stretchz.add_argument("--no-weld", action="store_true",
+                            help="concatenate the pieces instead of boolean-welding them")
+    p_stretchz.set_defaults(func=_cmd_stretchz)
 
     return parser
 

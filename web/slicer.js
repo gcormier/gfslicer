@@ -8,6 +8,7 @@
 import Module from "https://unpkg.com/manifold-3d@3.1.1/manifold.js";
 
 export const GRID = 42.0;
+export const Z_UNIT = 7.0; // GridFinity vertical height unit (mm); 0.5U = 3.5 mm
 const AXES = { x: 0, y: 1, z: 2 };
 
 let _wasm = null;
@@ -225,6 +226,86 @@ export function cutZPositions(positions, zStart, zEnd) {
       );
     }
     return weldSlab(wasm, solid, ax, start, end, size, cleanup);
+  } finally {
+    for (const obj of cleanup) {
+      try { obj.delete && obj.delete(); } catch { /* already freed */ }
+    }
+  }
+}
+
+// Duplicate the Z section between `zStart` and `zEnd` `copies` times to make the
+// model taller. Mirrors core.stretch_z. The caller must pick a section whose top
+// and bottom cross-sections match for a clean weld. Returns a manifold Mesh
+// ready for STL export.
+//
+// initManifold() must have resolved first.
+export function stretchZPositions(positions, zStart, zEnd, copies = 1) {
+  const wasm = _wasm;
+  if (!wasm) throw new Error("manifold not initialised — await initManifold() first");
+
+  const ax = 2; // Z
+  let start = Number(zStart);
+  let end = Number(zEnd);
+  if (end < start) [start, end] = [end, start];
+  if (!(end - start > 0)) throw new Error("the two Z heights must differ");
+  copies = Math.floor(copies);
+  if (copies < 1) throw new Error("copies must be >= 1");
+
+  const solid = manifoldFromPositions(wasm, positions);
+  const cleanup = [solid];
+
+  try {
+    const box = solid.boundingBox();
+    const lo = box.min, hi = box.max;
+    const size = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+    const tol = 1e-6;
+    if (start < lo[ax] - tol || end > hi[ax] + tol) {
+      throw new Error(
+        `Z section ${start.toFixed(3)}..${end.toFixed(3)} mm lies outside the ` +
+        `mesh (Z spans ${lo[ax].toFixed(3)}..${hi[ax].toFixed(3)} mm)`
+      );
+    }
+
+    const H = end - start;
+    // Coincident cut faces leave touching shells, so overlap each piece into the
+    // next by a tiny `eps` (bbox-relative, above manifold's precision floor).
+    const eps = Math.max(size[0], size[1], size[2]) * 1e-6;
+    const downN = [0, 0, 0]; downN[ax] = -1; // keep z <= A  via offset = -A
+    const upN = [0, 0, 0]; upN[ax] = 1;       // keep z >= A  via offset =  A
+
+    // lower: everything up to the section start (extended up by eps to overlap).
+    const lower = solid.trimByPlane(downN, -(start + eps));
+    cleanup.push(lower);
+    // section, extended up by eps so each stacked copy overlaps the one above.
+    const aboveStart = solid.trimByPlane(upN, start);
+    cleanup.push(aboveStart);
+    const sectionExt = aboveStart.trimByPlane(downN, -(end + eps));
+    cleanup.push(sectionExt);
+    // upper: everything from the section start up, lifted clear of the gap.
+    const upperRaw = solid.trimByPlane(upN, start);
+    cleanup.push(upperRaw);
+    const upShift = [0, 0, 0]; upShift[ax] = copies * H;
+    const upper = upperRaw.translate(upShift);
+    cleanup.push(upper);
+
+    const solids = [];
+    if (!lower.isEmpty()) solids.push(lower);
+    for (let j = 0; j < copies; j++) {
+      const shift = [0, 0, 0]; shift[ax] = j * H;
+      const copy = sectionExt.translate(shift);
+      cleanup.push(copy);
+      solids.push(copy);
+    }
+    solids.push(upper);
+
+    let acc = solids[0];
+    for (let i = 1; i < solids.length; i++) {
+      const u = wasm.Manifold.union(acc, solids[i]);
+      cleanup.push(u);
+      acc = u;
+    }
+    if (acc.isEmpty()) throw new Error("stretch produced an empty mesh");
+    return extractMesh(acc);
   } finally {
     for (const obj of cleanup) {
       try { obj.delete && obj.delete(); } catch { /* already freed */ }

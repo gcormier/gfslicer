@@ -138,6 +138,45 @@ async def cutz_endpoint(
     )
 
 
+@app.post("/stretchz")
+async def stretchz_endpoint(
+    file: UploadFile,
+    z_start: float = Form(...),
+    z_end: float = Form(...),
+    copies: int = Form(1),
+    out_format: str = Form("stl"),
+    weld: bool = Form(True),
+) -> Response:
+    data = await file.read()
+    mesh = _load_upload(data, file.filename or "upload")
+    try:
+        result = core.stretch_z(mesh, z_start=z_start, z_end=z_end, copies=copies, weld=weld)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    fmt = out_format.lower()
+    if fmt not in {"stl", "3mf"}:
+        raise HTTPException(400, "out_format must be stl or 3mf")
+
+    with tempfile.NamedTemporaryFile(suffix=f".{fmt}", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        result.export(tmp_path)
+        payload = tmp_path.read_bytes()
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    lo, hi = sorted((z_start, z_end))
+    stem = Path(file.filename or "model").stem
+    out_name = f"{stem}_stretchz_{lo:g}-{hi:g}x{copies}.{fmt}"
+    media = "model/3mf" if fmt == "3mf" else "model/stl"
+    return Response(
+        content=payload,
+        media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{out_name}"'},
+    )
+
+
 def main() -> None:
     import uvicorn
 
@@ -215,7 +254,12 @@ INDEX_HTML = """<!doctype html>
         </div>
       </div>
       <div id="zInputs" style="display:none;">
-        <div class="row">
+        <label>Operation</label>
+        <div class="seg" id="zOpSeg">
+          <button data-zop="remove" class="on">Remove</button>
+          <button data-zop="stretch">Stretch</button>
+        </div>
+        <div class="row" style="margin-top:8px;">
           <div>
             <label>From Z (mm)</label>
             <input id="zStart" type="number" step="0.1" value="0">
@@ -225,10 +269,19 @@ INDEX_HTML = """<!doctype html>
             <input id="zEnd" type="number" step="0.1" value="0">
           </div>
         </div>
-        <p style="font-size:11px;color:#9aa0ac;margin:6px 0 0;">
-          Removes everything between these two heights and welds the rest. Pick
-          heights with matching cross-sections (e.g. a straight-walled region).
-        </p>
+        <label>Section size (Gridfinity 1U = 7 mm)</label>
+        <div class="seg" id="zNudge">
+          <button data-du="-7">&minus;1U</button>
+          <button data-du="-3.5">&minus;&frac12;U</button>
+          <button data-du="3.5">+&frac12;U</button>
+          <button data-du="7">+1U</button>
+        </div>
+        <div id="zReadout" style="font-size:11px;color:#9aa0ac;margin-top:6px;"></div>
+        <div id="zCopiesWrap" style="display:none;">
+          <label>Copies to insert</label>
+          <input id="zCopies" type="number" min="1" value="1">
+        </div>
+        <p id="zHint" style="font-size:11px;color:#9aa0ac;margin:8px 0 0;"></p>
       </div>
       <label>Output format</label>
       <select id="fmt"><option value="stl">STL</option><option value="3mf">3MF</option></select>
@@ -258,6 +311,8 @@ const vp = document.getElementById('viewport');
 const hint = document.getElementById('hint');
 let renderer, scene, camera, controls, meshObj, slab, meta, fileData, fileName;
 let axis = 'x';
+let zop = 'remove';
+const Z_UNIT = 7.0;
 
 function initThree() {
   renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -319,10 +374,13 @@ function updateSlab() {
     let z1 = +document.getElementById('zEnd').value;
     if (z1 < z0) [z0, z1] = [z1, z0];
     const height = Math.max(0, z1 - z0);
+    // teal section to duplicate when stretching, red slab to remove otherwise
+    m.color.setHex(zop === 'stretch' ? 0x34d399 : 0xf87171);
     const g = new THREE.BoxGeometry(size.x * 1.02, size.y * 1.02, height || 1e-3);
     slab = new THREE.Mesh(g, m);
     slab.position.set(min.x + size.x/2, min.y + size.y/2, z0 + height/2);
     scene.add(slab);
+    updateZReadout();
     return;
   }
   const cell = +document.getElementById('cell').value;
@@ -366,7 +424,7 @@ document.getElementById('file').addEventListener('change', async (e) => {
   clampInputs();
 });
 
-['cell','count','zStart','zEnd'].forEach(id =>
+['cell','count','zStart','zEnd','zCopies'].forEach(id =>
   document.getElementById(id).addEventListener('input', () => { clampInputs(); updateSlab(); }));
 
 document.querySelectorAll('#axisSeg button').forEach(b =>
@@ -376,18 +434,57 @@ document.querySelectorAll('#axisSeg button').forEach(b =>
     const z = axis === 'z';
     document.getElementById('xyInputs').style.display = z ? 'none' : '';
     document.getElementById('zInputs').style.display = z ? '' : 'none';
+    document.getElementById('go').textContent =
+      z && zop === 'stretch' ? 'Stretch & download' : 'Cut & download';
     if (z) initZDefaults();
     clampInputs(); updateSlab();
   }));
 
-// Seed the Z fields with sensible interior heights the first time Z is chosen.
+document.querySelectorAll('#zOpSeg button').forEach(b =>
+  b.addEventListener('click', () => {
+    document.querySelectorAll('#zOpSeg button').forEach(x => x.classList.remove('on'));
+    b.classList.add('on'); zop = b.dataset.zop;
+    document.getElementById('zCopiesWrap').style.display = zop === 'stretch' ? '' : 'none';
+    document.getElementById('go').textContent = zop === 'stretch' ? 'Stretch & download' : 'Cut & download';
+    clampInputs(); updateSlab();
+  }));
+
+// Section-size nudge buttons: grow/shrink the section by a Gridfinity unit.
+document.querySelectorAll('#zNudge button').forEach(b =>
+  b.addEventListener('click', () => {
+    if (!meta) return;
+    const zEl = document.getElementById('zStart'), zEl2 = document.getElementById('zEnd');
+    let z0 = +zEl.value, z1 = +zEl2.value; if (z1 < z0) [z0, z1] = [z1, z0];
+    z1 = z1 + parseFloat(b.dataset.du);
+    zEl.value = z0.toFixed(2); zEl2.value = z1.toFixed(2);
+    clampInputs(); updateSlab();
+  }));
+
+// Seed the Z fields with a sensible interior 1U section the first time Z is chosen.
 function initZDefaults() {
   if (!meta) return;
   const zEl = document.getElementById('zStart'), zEl2 = document.getElementById('zEnd');
   if (+zEl.value === 0 && +zEl2.value === 0) {
     const lo = meta.min.z, h = meta.size.z;
-    zEl.value = (lo + h/3).toFixed(2);
-    zEl2.value = (lo + 2*h/3).toFixed(2);
+    const start = lo + h/3;
+    zEl.value = start.toFixed(2);
+    zEl2.value = Math.min(start + Z_UNIT, lo + h).toFixed(2);
+  }
+}
+
+function updateZReadout() {
+  let z0 = +document.getElementById('zStart').value, z1 = +document.getElementById('zEnd').value;
+  if (z1 < z0) [z0, z1] = [z1, z0];
+  const h = Math.max(0, z1 - z0), u = h / Z_UNIT;
+  const readout = document.getElementById('zReadout');
+  const hint = document.getElementById('zHint');
+  if (zop === 'stretch') {
+    const n = Math.max(1, +document.getElementById('zCopies').value || 1);
+    readout.textContent = `Section ${h.toFixed(2)} mm = ${u.toFixed(2)}U → +${(h*n).toFixed(2)} mm taller`;
+    hint.textContent = 'Duplicates this section to make the model taller. Pick a section whose top and bottom cross-sections match (e.g. straight wall).';
+  } else {
+    readout.textContent = `Section ${h.toFixed(2)} mm = ${u.toFixed(2)}U (1U = 7 mm)`;
+    hint.textContent = 'Removes everything between these two heights and welds the rest. Pick heights with matching cross-sections.';
   }
 }
 
@@ -400,6 +497,8 @@ function clampInputs() {
     zEl2.min = lo.toFixed(2); zEl2.max = hi.toFixed(2);
     zEl.value = Math.min(Math.max(lo, +zEl.value), hi);
     zEl2.value = Math.min(Math.max(lo, +zEl2.value), hi);
+    const cEl = document.getElementById('zCopies');
+    cEl.value = Math.max(1, Math.floor(+cEl.value) || 1);
     return;
   }
   const total = meta.units[axis];
@@ -418,9 +517,14 @@ document.getElementById('go').addEventListener('click', async () => {
   fd.append('out_format', fmt);
   let endpoint;
   if (axis === 'z') {
-    endpoint = '/cutz';
     fd.append('z_start', document.getElementById('zStart').value);
     fd.append('z_end', document.getElementById('zEnd').value);
+    if (zop === 'stretch') {
+      endpoint = '/stretchz';
+      fd.append('copies', document.getElementById('zCopies').value);
+    } else {
+      endpoint = '/cutz';
+    }
   } else {
     endpoint = '/cut';
     fd.append('axis', axis);
