@@ -138,22 +138,21 @@ def _slice_keep(mesh: trimesh.Trimesh, axis_vec: np.ndarray, origin: np.ndarray)
     return piece
 
 
-def cut(
+def _remove_slab(
     mesh: trimesh.Trimesh,
-    axis: str,
-    cell: int,
-    count: int = 1,
+    ax: int,
+    start: float,
+    end: float,
     *,
     weld: bool = True,
 ) -> trimesh.Trimesh:
-    """Remove ``count`` 42 mm cells starting at ``cell`` along ``axis`` and rejoin.
+    """Remove the slab between ``start`` and ``end`` along axis ``ax`` and rejoin.
 
-    When ``weld`` is True (default) the two remaining pieces are boolean-unioned
-    into a single watertight mesh. When False they are merely concatenated --
-    faster, and a useful fallback if a boolean backend is unavailable.
+    ``start`` and ``end`` are absolute coordinates along the axis. Everything
+    below ``start`` is kept in place; everything above ``end`` is slid back by
+    the slab width so its cut face meets the near piece's, then the two are
+    welded (or merely concatenated when ``weld`` is False).
     """
-    ax = axis_index(axis)
-    start, end = cut_planes(mesh, axis, cell, count)
     width = end - start
 
     normal = np.zeros(3)
@@ -164,9 +163,9 @@ def cut(
     # ... and everything above `end` (normal pointing +axis).
     right = _slice_keep(mesh, normal, _origin(ax, end))
 
-    # Removing the first or last cell leaves only one piece; just shift it.
+    # A plane sitting on the mesh boundary leaves only one piece; just shift it.
     if left is None and right is None:
-        raise ValueError("slice produced no geometry -- check axis/cell/count")
+        raise ValueError("slice produced no geometry -- check the cut bounds")
 
     shift = np.zeros(3)
     shift[ax] = -width
@@ -187,6 +186,64 @@ def cut(
         # Fall back to a plain concatenation rather than failing outright.
         return trimesh.util.concatenate([left, right])
     return joined
+
+
+def cut(
+    mesh: trimesh.Trimesh,
+    axis: str,
+    cell: int,
+    count: int = 1,
+    *,
+    weld: bool = True,
+) -> trimesh.Trimesh:
+    """Remove ``count`` 42 mm cells starting at ``cell`` along ``axis`` and rejoin.
+
+    When ``weld`` is True (default) the two remaining pieces are boolean-unioned
+    into a single watertight mesh. When False they are merely concatenated --
+    faster, and a useful fallback if a boolean backend is unavailable.
+    """
+    ax = axis_index(axis)
+    start, end = cut_planes(mesh, axis, cell, count)
+    return _remove_slab(mesh, ax, start, end, weld=weld)
+
+
+def cut_z(
+    mesh: trimesh.Trimesh,
+    z_start: float,
+    z_end: float,
+    *,
+    weld: bool = True,
+) -> trimesh.Trimesh:
+    """Remove the Z section between ``z_start`` and ``z_end`` and rejoin.
+
+    Unlike :func:`cut`, this is not tied to the 42 mm grid: the two heights are
+    arbitrary absolute Z coordinates. The section between them is cut out, the
+    upper piece is dropped by the section height so its cut face meets the lower
+    piece's, and the two are welded back together.
+
+    It is the caller's responsibility to pick heights where the cross-sections
+    match (e.g. within a straight-walled region) so the weld is clean -- the
+    geometry does not repeat on a fixed pitch the way it does in X/Y.
+
+    Chopping the top (or bottom) off is intentionally out of scope: pick two
+    interior heights so both pieces survive. A plane that lands on the boundary
+    still works, but degrades to a plain chop.
+    """
+    z_start = float(z_start)
+    z_end = float(z_end)
+    lo = float(mesh.bounds[0][2])
+    hi = float(mesh.bounds[1][2])
+    if z_end < z_start:
+        z_start, z_end = z_end, z_start
+    if z_end - z_start <= 0:
+        raise ValueError("the two Z heights must differ")
+    tol = 1e-6
+    if z_start < lo - tol or z_end > hi + tol:
+        raise ValueError(
+            f"Z section {z_start:.3f}..{z_end:.3f} mm lies outside the mesh "
+            f"(Z spans {lo:.3f}..{hi:.3f} mm)"
+        )
+    return _remove_slab(mesh, AXES["z"], z_start, z_end, weld=weld)
 
 
 def _origin(ax: int, value: float) -> np.ndarray:
