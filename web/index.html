@@ -99,12 +99,12 @@ const manifoldReady = initManifold().catch(err => { setErr('failed to load geome
 function initThree() {
   renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(devicePixelRatio);
-  resize();
   vp.appendChild(renderer.domElement);
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x0e1014);
   camera = new THREE.PerspectiveCamera(45, 1, 0.1, 5000);
   controls = new OrbitControls(camera, renderer.domElement);
+  resize(); // now that the camera exists, size it with the correct aspect ratio
   scene.add(new THREE.HemisphereLight(0xffffff, 0x223044, 1.1));
   const d = new THREE.DirectionalLight(0xffffff, 1.4); d.position.set(1, 1.5, 1); scene.add(d);
   window.addEventListener('resize', resize);
