@@ -4,10 +4,32 @@ __pycache__/
 build/
 dist/
 wheels/
-*.egg-info
+*.egg-info/
 
 # Virtual environments
-.venv
+.venv/
+venv/
+
+# Node / web tooling (for the static client build)
+node_modules/
+npm-debug.log*
+yarn-error.log*
+.cache/
+
+# Test / coverage artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+.mypy_cache/
 
 # Editor / tooling
 .claude/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/

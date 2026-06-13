@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GridFinity Slicer</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; font-family: system-ui, sans-serif; background:#15171c; color:#e6e6e6; }
+  header { padding:14px 20px; background:#1d2027; border-bottom:1px solid #2c303a; }
+  header h1 { margin:0; font-size:17px; font-weight:600; }
+  header p { margin:4px 0 0; font-size:12px; color:#9aa0ac; }
+  .wrap { display:flex; gap:16px; padding:16px; flex-wrap:wrap; }
+  #viewport { flex:1 1 480px; min-height:460px; background:#0e1014; border:1px solid #2c303a; border-radius:8px; position:relative; }
+  #hint { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:#5b6270; font-size:13px; pointer-events:none; }
+  .panel { flex:0 0 300px; display:flex; flex-direction:column; gap:14px; }
+  .card { background:#1d2027; border:1px solid #2c303a; border-radius:8px; padding:14px; }
+  .card h2 { margin:0 0 10px; font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:#9aa0ac; }
+  label { display:block; font-size:12px; margin:8px 0 4px; color:#b8bdc8; }
+  input[type=file] { font-size:12px; }
+  .row { display:flex; gap:8px; }
+  .row > div { flex:1; }
+  select, input[type=number] { width:100%; box-sizing:border-box; background:#0e1014; color:#e6e6e6;
+    border:1px solid #353a45; border-radius:5px; padding:7px; font-size:13px; }
+  button { width:100%; background:#3b82f6; color:#fff; border:0; border-radius:6px; padding:10px;
+    font-size:14px; font-weight:600; cursor:pointer; margin-top:6px; }
+  button:disabled { background:#33384a; color:#7a808c; cursor:not-allowed; }
+  .seg { display:flex; gap:6px; }
+  .seg button { flex:1; margin:0; background:#0e1014; border:1px solid #353a45; color:#cfd3db; font-weight:500; }
+  .seg button.on { background:#3b82f6; border-color:#3b82f6; color:#fff; }
+  pre { white-space:pre-wrap; font-size:11px; color:#9aa0ac; margin:0; line-height:1.5; }
+  .err { color:#f87171; font-size:12px; }
+  .legend { font-size:11px; color:#9aa0ac; display:flex; gap:14px; margin-top:8px; }
+  .swatch { display:inline-block; width:11px; height:11px; border-radius:2px; vertical-align:middle; margin-right:5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>GridFinity Slicer</h1>
+  <p>Cut an exact 42&nbsp;mm chunk out of a bin and weld it back together — runs entirely in your browser.</p>
+</header>
+<div class="wrap">
+  <div id="viewport"><div id="hint">Upload an STL to preview</div></div>
+  <div class="panel">
+    <div class="card">
+      <h2>1. File</h2>
+      <input id="file" type="file" accept=".stl">
+      <pre id="info" style="margin-top:10px;"></pre>
+      <div class="err" id="err"></div>
+    </div>
+    <div class="card">
+      <h2>2. Cut</h2>
+      <label>Axis</label>
+      <div class="seg" id="axisSeg">
+        <button data-axis="x" class="on">X</button>
+        <button data-axis="y">Y</button>
+      </div>
+      <div class="row">
+        <div>
+          <label>First cell to remove</label>
+          <input id="cell" type="number" min="0" value="0">
+        </div>
+        <div>
+          <label>Number of cells</label>
+          <input id="count" type="number" min="1" value="1">
+        </div>
+      </div>
+      <div class="legend">
+        <span><span class="swatch" style="background:#9499a3"></span>keep</span>
+        <span><span class="swatch" style="background:#f87171"></span>remove</span>
+      </div>
+      <button id="go" disabled>Cut &amp; download STL</button>
+    </div>
+  </div>
+</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+import { initManifold, inspectPositions, describe, cutPositions, GRID } from './slicer.js';
+import { meshToBinarySTL } from './stl.js';
+
+const vp = document.getElementById('viewport');
+const hint = document.getElementById('hint');
+let renderer, scene, camera, controls, meshObj, slab, meta, positions, fileName;
+let axis = 'x';
+
+// Kick off the WASM load immediately so the Cut button is ready by the time a
+// file is picked.
+const manifoldReady = initManifold().catch(err => { setErr('failed to load geometry engine: ' + err); throw err; });
+
+function initThree() {
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(devicePixelRatio);
+  resize();
+  vp.appendChild(renderer.domElement);
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0e1014);
+  camera = new THREE.PerspectiveCamera(45, 1, 0.1, 5000);
+  controls = new OrbitControls(camera, renderer.domElement);
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x223044, 1.1));
+  const d = new THREE.DirectionalLight(0xffffff, 1.4); d.position.set(1, 1.5, 1); scene.add(d);
+  window.addEventListener('resize', resize);
+  (function loop(){ requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); })();
+}
+function resize() {
+  const w = vp.clientWidth, h = vp.clientHeight;
+  if (renderer) { renderer.setSize(w, h, false); camera && (camera.aspect = w/h, camera.updateProjectionMatrix()); }
+}
+
+const previewMat = new THREE.MeshStandardMaterial({ color: 0x9499a3, metalness: 0.05, roughness: 0.85 });
+const edgeMat = new THREE.LineBasicMaterial({ color: 0x202531 });
+
+// Add a hard-edge wireframe overlay so geometry reads clearly.
+function addEdges(mesh) {
+  const edges = new THREE.EdgesGeometry(mesh.geometry, 25); // angle threshold in degrees
+  mesh.add(new THREE.LineSegments(edges, edgeMat));
+}
+
+function showMesh(geometry) {
+  if (meshObj) { scene.remove(meshObj); meshObj = null; }
+  geometry.computeVertexNormals();
+  meshObj = new THREE.Mesh(geometry, previewMat);
+  addEdges(meshObj);
+  scene.add(meshObj);
+  const bb = new THREE.Box3().setFromObject(meshObj);
+  const c = new THREE.Vector3(); bb.getCenter(c);
+  const size = new THREE.Vector3(); bb.getSize(size);
+  const r = Math.max(size.x, size.y, size.z);
+  controls.target.copy(c);
+  camera.position.set(c.x + r*1.1, c.y + r*1.1, c.z + r*1.6);
+  camera.near = r/100; camera.far = r*20; camera.updateProjectionMatrix();
+  updateSlab();
+}
+
+function updateSlab() {
+  if (slab) { scene.remove(slab); slab = null; }
+  if (!meta) return;
+  const cell = +document.getElementById('cell').value;
+  const count = Math.max(1, +document.getElementById('count').value);
+  const min = meta.min, size = meta.size;
+  const start = min[axis] + cell * GRID;
+  const width = count * GRID;
+  const g = new THREE.BoxGeometry(
+    axis === 'x' ? width : size.x,
+    axis === 'y' ? width : size.y,
+    size.z * 1.02
+  );
+  const m = new THREE.MeshStandardMaterial({ color: 0xf87171, transparent: true, opacity: 0.5 });
+  slab = new THREE.Mesh(g, m);
+  slab.position.set(
+    axis === 'x' ? start + width/2 : min.x + size.x/2,
+    axis === 'y' ? start + width/2 : min.y + size.y/2,
+    min.z + size.z/2
+  );
+  scene.add(slab);
+}
+
+document.getElementById('file').addEventListener('change', async (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  fileName = f.name;
+  setErr('');
+  let geometry;
+  try {
+    const buf = await f.arrayBuffer();
+    geometry = new STLLoader().parse(buf);
+  } catch (err) {
+    return setErr('could not parse STL: ' + err);
+  }
+  positions = geometry.attributes.position.array;
+  const info = inspectPositions(positions);
+  meta = {
+    min: { x: info.lo[0], y: info.lo[1], z: info.lo[2] },
+    size: { x: info.size[0], y: info.size[1], z: info.size[2] },
+    units: { x: info.units.x, y: info.units.y },
+  };
+  document.getElementById('info').textContent = describe(info);
+  document.getElementById('go').disabled = false;
+  hint.style.display = 'none';
+  showMesh(geometry);
+  clampInputs();
+});
+
+['cell','count'].forEach(id =>
+  document.getElementById(id).addEventListener('input', () => { clampInputs(); updateSlab(); }));
+
+document.querySelectorAll('#axisSeg button').forEach(b =>
+  b.addEventListener('click', () => {
+    document.querySelectorAll('#axisSeg button').forEach(x => x.classList.remove('on'));
+    b.classList.add('on'); axis = b.dataset.axis; clampInputs(); updateSlab();
+  }));
+
+function clampInputs() {
+  if (!meta) return;
+  const total = meta.units[axis];
+  const countEl = document.getElementById('count'), cellEl = document.getElementById('cell');
+  let count = Math.min(Math.max(1, +countEl.value), total);
+  countEl.value = count; countEl.max = total;
+  cellEl.max = Math.max(0, total - count);
+  cellEl.value = Math.min(Math.max(0, +cellEl.value), total - count);
+}
+
+document.getElementById('go').addEventListener('click', async () => {
+  if (!positions) return;
+  const go = document.getElementById('go');
+  const cell = +document.getElementById('cell').value;
+  const count = +document.getElementById('count').value;
+  setErr('');
+  go.disabled = true; const label = go.textContent; go.textContent = 'Welding…';
+  try {
+    await manifoldReady;
+    const mesh = cutPositions(positions, axis, cell, count);
+    const stl = meshToBinarySTL(mesh.vertProperties, mesh.triVerts);
+    const blob = new Blob([stl], { type: 'model/stl' });
+    const stem = fileName.replace(/\.[^.]+$/, '');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${stem}_cut_${axis}${cell}x${count}.stl`;
+    a.click(); URL.revokeObjectURL(a.href);
+  } catch (err) {
+    setErr(String(err && err.message ? err.message : err));
+  } finally {
+    go.textContent = label; go.disabled = false;
+  }
+});
+
+function setErr(m){ document.getElementById('err').textContent = m; }
+initThree();
+</script>
+</body>
+</html>
