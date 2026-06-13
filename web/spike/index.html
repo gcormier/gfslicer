@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Manifold weld spike</title>
+<style>
+  body { font-family: ui-monospace, monospace; background:#0e1014; color:#e6e6e6; margin:0; padding:24px; }
+  h1 { font-size:16px; }
+  #out { white-space:pre-wrap; font-size:13px; line-height:1.6; }
+  .pass { color:#4ade80; } .fail { color:#f87171; } .note { color:#9aa0ac; }
+</style>
+</head>
+<body>
+<h1>Phase 1 spike — manifold-3d weld in the browser</h1>
+<div id="out">running…</div>
+
+<script type="module">
+import Module from 'https://unpkg.com/manifold-3d@3.1.1/manifold.js';
+
+const GRID = 42.0;
+const out = document.getElementById('out');
+const lines = [];
+let failures = 0;
+function log(msg, cls='') { lines.push(cls ? `<span class="${cls}">${msg}</span>` : msg); out.innerHTML = lines.join('\n'); }
+function check(name, cond, detail='') {
+  if (cond) log(`  PASS  ${name}  ${detail}`, 'pass');
+  else { failures++; log(`  FAIL  ${name}  ${detail}`, 'fail'); }
+}
+const approx = (a, b, tol) => Math.abs(a - b) <= tol;
+
+// Explode a (correct) manifold mesh into STL-style triangle soup: every triangle
+// gets its own 3 unshared vertices. This is exactly what an uploaded STL looks
+// like, and is the input we need merge() to weld back into a valid manifold.
+function explodeToSoup(mesh) {
+  const nTri = mesh.triVerts.length / 3;
+  const vp = new Float32Array(nTri * 3 * 3);
+  const tv = new Uint32Array(nTri * 3);
+  for (let i = 0; i < nTri * 3; i++) {
+    const src = mesh.triVerts[i];
+    vp[i*3+0] = mesh.vertProperties[src*3+0];
+    vp[i*3+1] = mesh.vertProperties[src*3+1];
+    vp[i*3+2] = mesh.vertProperties[src*3+2];
+    tv[i] = i;
+  }
+  return { numProp: 3, vertProperties: vp, triVerts: tv };
+}
+
+try {
+  log('loading WASM…', 'note');
+  const wasm = await Module({ locateFile: () => 'https://unpkg.com/manifold-3d@3.1.1/manifold.wasm' });
+  wasm.setup();
+  const { Manifold, Mesh } = wasm;
+  log('WASM ready.\n', 'note');
+
+  // --- A uniform GridFinity-style bar: 4 cells on X, footprint gap of 0.5mm ---
+  // Mirrors tests/test_core.py make_bar(4): extents (4*42-0.5, 41.5, 20), min at origin.
+  const UNITS = 4, FOOT = 41.5, H = 20.0;
+  const lenX = UNITS * GRID - (GRID - FOOT);   // 167.5
+  log(`Bar: ${UNITS} cells, extents ${lenX} x ${FOOT} x ${H} (min at origin)\n`);
+
+  const bar = Manifold.cube([lenX, FOOT, H]);   // valid manifold, min corner at origin
+  const barVol = bar.volume();
+  const barBox = bar.boundingBox();
+  const barWidth = barBox.max[0] - barBox.min[0];
+
+  // --- Step 1: STL-soup -> merge() -> Manifold (the input-robustness concern) ---
+  const soup = explodeToSoup(bar.getMesh());
+  const soupVertCount = soup.vertProperties.length / 3;     // 36 for a box
+  const m = new Mesh(soup);
+  const merged = m.merge();                                  // welds coincident verts
+  const fromSoup = new Manifold(m);
+  log('Step 1 — STL-style triangle soup -> merge() -> Manifold');
+  check('merge() reported a change', merged === true, `(soup verts=${soupVertCount})`);
+  check('manifold is not empty', !fromSoup.isEmpty());
+  check('welded down to 8 unique verts', fromSoup.numVert() === 8, `(got ${fromSoup.numVert()})`);
+  check('volume preserved through soup round-trip', approx(fromSoup.volume(), barVol, 1e-3),
+        `(${fromSoup.volume().toFixed(2)} vs ${barVol.toFixed(2)})`);
+  check('genus 0 (watertight, no holes)', fromSoup.genus() === 0, `(genus=${fromSoup.genus()})`);
+
+  // --- Step 2: the cut pipeline, mirroring core.cut(axis=x, cell=1, count=1) ---
+  log('\nStep 2 — cut: remove cell 1 (one 42mm slab) on X, then weld');
+  const cell = 1, count = 1;
+  const start = barBox.min[0] + cell * GRID;       // 42
+  const end = start + count * GRID;                // 84
+  const width = end - start;                       // 42
+
+  const left  = fromSoup.trimByPlane([-1, 0, 0], -start);  // keep x <= start
+  let   right = fromSoup.trimByPlane([ 1, 0, 0],  end);    // keep x >= end
+  right = right.translate(-width, 0, 0);                   // slide far piece back
+  const result = Manifold.union(left, right);
+
+  const rBox = result.boundingBox();
+  const rWidth = rBox.max[0] - rBox.min[0];
+  const cellVol = GRID * FOOT * H;
+
+  check('result is a single non-empty manifold', !result.isEmpty() && result.numTri() > 0,
+        `(tris=${result.numTri()})`);
+  // Coincident seam: the two cut faces land on the exact same plane, so union
+  // leaves two touching shells (genus -1), NOT one fused solid. Geometrically
+  // exact, but Step 3 shows how to fuse it. Asserting -1 documents the behavior.
+  check('seam is coincident -> two touching shells (expected genus -1)', result.genus() === -1,
+        `(genus=${result.genus()})`);
+  check('removed exactly 42mm on X', approx(barWidth - rWidth, GRID, 1e-4),
+        `(before=${barWidth.toFixed(2)} after=${rWidth.toFixed(2)} diff=${(barWidth-rWidth).toFixed(4)})`);
+  check('volume dropped by exactly one cell', approx(barVol - result.volume(), cellVol, cellVol * 1e-3),
+        `(drop=${(barVol-result.volume()).toFixed(2)} expected=${cellVol.toFixed(2)})`);
+
+  // --- Step 3: same weld, but with a sub-micron overlap so the two coincident
+  // faces genuinely interpenetrate and fuse into ONE connected solid (genus 0).
+  log('\nStep 3 — weld with a 5e-5 mm overlap (fuse the coincident seam)');
+  const EPS = 5e-5;   // just above manifold's bbox-relative precision (~1.7e-5 here)
+  const left3  = fromSoup.trimByPlane([-1, 0, 0], -start);
+  let   right3 = fromSoup.trimByPlane([ 1, 0, 0],  end);
+  right3 = right3.translate(-(width + EPS), 0, 0);   // overlap by EPS at the seam
+  const result3 = Manifold.union(left3, right3);
+  const r3Box = result3.boundingBox();
+  const r3Width = r3Box.max[0] - r3Box.min[0];
+  check('result3 genus 0 (single fused solid)', result3.genus() === 0, `(genus=${result3.genus()})`);
+  check('result3 still removes ~42mm within 1e-4', approx(barWidth - r3Width, GRID, 1e-4),
+        `(diff=${(barWidth - r3Width).toFixed(6)})`);
+  check('result3 volume drop within tolerance', approx(barVol - result3.volume(), cellVol, cellVol * 1e-3),
+        `(drop=${(barVol - result3.volume()).toFixed(2)})`);
+
+  // free WASM memory
+  [bar, fromSoup, left, right, result, left3, right3, result3].forEach(x => x.delete && x.delete());
+
+  log(`\n${failures === 0 ? 'ALL CHECKS PASSED ✅' : failures + ' CHECK(S) FAILED ❌'}`,
+      failures === 0 ? 'pass' : 'fail');
+  window.__SPIKE_RESULT__ = { failures, done: true };
+} catch (err) {
+  log('\nSPIKE ERROR: ' + (err && err.stack ? err.stack : err), 'fail');
+  window.__SPIKE_RESULT__ = { failures: -1, done: true, error: String(err) };
+}
+</script>
+</body>
+</html>
