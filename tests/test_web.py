@@ -77,6 +77,24 @@ def test_cutz_out_of_bounds_rejected():
     assert r.status_code == 400
 
 
+def test_stretchz_downloads_taller_mesh():
+    files = {"file": ("bar.stl", tall_bar_bytes(60.0), "model/stl")}
+    data = {"z_start": "20", "z_end": "27", "copies": "2", "out_format": "stl"}
+    r = client.post("/stretchz", files=files, data=data)
+    assert r.status_code == 200
+    assert r.headers["content-disposition"].endswith('bar_stretchz_20-27x2.stl"')
+    result = trimesh.load(io.BytesIO(r.content), file_type="stl", force="mesh")
+    span = result.bounds[1][2] - result.bounds[0][2]
+    assert span == pytest.approx(60.0 + 14.0, abs=1e-3)  # two 7 mm copies
+
+
+def test_stretchz_out_of_bounds_rejected():
+    files = {"file": ("bar.stl", tall_bar_bytes(40.0), "model/stl")}
+    data = {"z_start": "10", "z_end": "100", "copies": "1", "out_format": "stl"}
+    r = client.post("/stretchz", files=files, data=data)
+    assert r.status_code == 400
+
+
 def test_bad_axis_value_is_rejected():
     files = {"file": ("bar.stl", bar_bytes(2), "model/stl")}
     data = {"axis": "x", "cell": "5", "count": "1", "out_format": "stl"}

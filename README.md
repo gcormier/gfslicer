@@ -41,6 +41,9 @@ uv run gridfinity-slicer cut bin.3mf -a y -c 0 -n 2
 
 # Remove an arbitrary Z section between 25 mm and 55 mm and weld the rest
 uv run gridfinity-slicer cutz bin.stl --from 25 --to 55 -o bin_shorter.stl
+
+# Make a bin taller: duplicate the 25–32 mm section (1U = 7 mm) twice
+uv run gridfinity-slicer stretchz bin.stl --from 25 --to 32 --copies 2 -o bin_taller.stl
 ```
 
 `cut` options:
@@ -53,29 +56,40 @@ uv run gridfinity-slicer cutz bin.stl --from 25 --to 55 -o bin_shorter.stl
 | `-o, --output FILE` | output `.stl` or `.3mf` | derived from input |
 | `--no-weld` | concatenate instead of boolean-welding (faster fallback) | off |
 
-`cutz` options:
+`cutz` / `stretchz` options:
 
 | flag | meaning | default |
 |------|---------|---------|
-| `-f, --from MM` | lower Z height of the section to remove | required |
-| `-t, --to MM` | upper Z height of the section to remove | required |
+| `-f, --from MM` | lower Z height of the section | required |
+| `-t, --to MM` | upper Z height of the section | required |
+| `-n, --copies N` | (`stretchz` only) extra copies of the section to insert | `1` |
 | `-o, --output FILE` | output `.stl` or `.3mf` | derived from input |
 | `--no-weld` | concatenate instead of boolean-welding (faster fallback) | off |
 
 Output format follows the output file's extension (`.stl` or `.3mf`).
 
-## Cutting along Z
+## Adjusting height along Z
 
-`cutz` removes the slab between two arbitrary Z heights and welds the upper
-piece down onto the lower one — handy for shortening the *height* of a bin
-(e.g. dropping a tall bin's wall) without re-modelling it. Unlike X/Y, Z is
-**not** tied to the 42 mm grid, so you give two absolute heights in millimetres.
+Z is the **vertical** axis. GridFinity's vertical pitch is **7 mm per height
+unit (1U)**, so heights here move in 1U / ½U (3.5 mm) steps rather than the 42 mm
+X/Y grid. Two commands work on a Z *section* — the slab between two heights:
 
-Because the geometry doesn't repeat on a fixed pitch in Z, pick two heights with
-matching cross-sections — typically anywhere in a straight-walled region — so the
-cut faces weld with no gap or overhang. Slicing the top clean off isn't the goal
-here (any printing slicer can split an object); `cutz` is for taking a slice out
-of the *middle* and gluing the ends back together.
+* **`cutz`** removes the section and welds the upper piece down onto the lower one
+  — shortens a bin without re-modelling it.
+* **`stretchz`** duplicates the section `--copies` times and stacks the copies in
+  place — makes a bin taller. Each copy is real geometry lifted from the model,
+  so the inserted walls match exactly.
+
+Z is **not** tied to the 42 mm grid, so you give absolute heights in mm. Because
+the geometry doesn't repeat on a fixed pitch in Z, pick a section whose top and
+bottom cross-sections match — typically anywhere in a straight-walled region — so
+the seams weld with no gap or overhang. Choosing a whole number of 7 mm units
+keeps the result a valid stacking height. Slicing the top clean off isn't the
+goal (any printing slicer can split an object); these are for taking a slice out
+of the *middle*, or inserting one, and gluing the ends back together.
+
+In the web UI, pick the **Z** axis, then toggle **Remove** / **Stretch**; the
+½U / 1U buttons nudge the section size and the readout shows it in both mm and U.
 
 ## Web UI
 
@@ -85,8 +99,8 @@ uv run gridfinity-slicer-web        # serves http://127.0.0.1:8000
 
 Upload an STL/3MF, see it rendered in 3D with the slab to remove highlighted in
 red, pick axis / cell / count, then download the rejoined mesh. Choose the **Z**
-axis to switch to a height-based cut: enter two Z heights and the slab between
-them is removed and welded back together.
+axis to switch to height-based edits (in 7 mm / 3.5 mm Gridfinity units) and
+**Remove** or **Stretch** a section — see *Adjusting height along Z* below.
 
 ## How a cut maps to cells
 

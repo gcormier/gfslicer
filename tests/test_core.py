@@ -140,6 +140,40 @@ def test_cut_z_out_of_bounds_raises():
         core.cut_z(bar, 10.0, 60.0)
 
 
+def test_stretch_z_adds_one_section():
+    bar = trimesh.creation.box(extents=(41.5, 41.5, 80.0))
+    bar.apply_translation(-bar.bounds[0])
+    before = bar.bounds[1][2] - bar.bounds[0][2]
+    result = core.stretch_z(bar, 20.0, 41.0, copies=1, weld=True)  # 21 mm = 3U section
+    after = result.bounds[1][2] - result.bounds[0][2]
+    assert after - before == pytest.approx(21.0, abs=1e-6)
+    assert result.is_watertight
+    assert result.volume > bar.volume
+
+
+def test_stretch_z_multiple_copies():
+    bar = trimesh.creation.box(extents=(30.0, 25.0, 80.0))
+    bar.apply_translation(-bar.bounds[0])
+    before = bar.bounds[1][2] - bar.bounds[0][2]
+    result = core.stretch_z(bar, 20.0, 27.0, copies=3, weld=True)  # 7 mm section x3
+    after = result.bounds[1][2] - result.bounds[0][2]
+    assert after - before == pytest.approx(21.0, abs=1e-6)
+    # Uniform cross-section: added volume is 3 sections of straight wall.
+    added = 30.0 * 25.0 * 7.0 * 3
+    assert result.volume - bar.volume == pytest.approx(added, rel=1e-3)
+
+
+def test_stretch_z_validation():
+    bar = trimesh.creation.box(extents=(20.0, 20.0, 40.0))
+    bar.apply_translation(-bar.bounds[0])
+    with pytest.raises(ValueError):
+        core.stretch_z(bar, 10.0, 10.0, copies=1)
+    with pytest.raises(ValueError):
+        core.stretch_z(bar, 10.0, 20.0, copies=0)
+    with pytest.raises(ValueError):
+        core.stretch_z(bar, 10.0, 60.0, copies=1)
+
+
 def test_y_axis_cut():
     bar = make_bar(2)  # 2 on X
     bar_y = bar.copy()

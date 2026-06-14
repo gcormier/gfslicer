@@ -23,7 +23,8 @@ from pathlib import Path
 import numpy as np
 import trimesh
 
-GRID = 42.0  # GridFinity pitch in millimetres
+GRID = 42.0  # GridFinity pitch in millimetres (X/Y)
+Z_UNIT = 7.0  # GridFinity vertical height unit in millimetres (Z); 0.5U = 3.5 mm
 AXES = {"x": 0, "y": 1, "z": 2}
 
 
@@ -244,6 +245,80 @@ def cut_z(
             f"(Z spans {lo:.3f}..{hi:.3f} mm)"
         )
     return _remove_slab(mesh, AXES["z"], z_start, z_end, weld=weld)
+
+
+def stretch_z(
+    mesh: trimesh.Trimesh,
+    z_start: float,
+    z_end: float,
+    copies: int = 1,
+    *,
+    weld: bool = True,
+) -> trimesh.Trimesh:
+    """Duplicate the Z section between ``z_start`` and ``z_end`` to make the mesh taller.
+
+    The section between the two heights is copied ``copies`` times and stacked in
+    place: everything below ``z_start`` stays put, ``copies`` fresh copies of the
+    section are inserted, and everything from ``z_start`` up (the original section
+    included) is lifted by ``copies * height``. The result is ``copies * height``
+    mm taller.
+
+    Like :func:`cut_z`, this is grid-independent and it is the caller's job to
+    pick a section whose top and bottom cross-sections match (e.g. a stretch of
+    straight wall) so the inserted copies weld seamlessly. Picking a whole number
+    of 7 mm Gridfinity units keeps the taller result a valid stacking height.
+    """
+    z_start = float(z_start)
+    z_end = float(z_end)
+    if z_end < z_start:
+        z_start, z_end = z_end, z_start
+    if z_end - z_start <= 0:
+        raise ValueError("the two Z heights must differ")
+    if copies < 1:
+        raise ValueError("copies must be >= 1")
+    lo = float(mesh.bounds[0][2])
+    hi = float(mesh.bounds[1][2])
+    tol = 1e-6
+    if z_start < lo - tol or z_end > hi + tol:
+        raise ValueError(
+            f"Z section {z_start:.3f}..{z_end:.3f} mm lies outside the mesh "
+            f"(Z spans {lo:.3f}..{hi:.3f} mm)"
+        )
+
+    ax = AXES["z"]
+    height = z_end - z_start
+    normal = np.zeros(3)
+    normal[ax] = 1.0
+
+    above = _slice_keep(mesh, normal, _origin(ax, z_start))   # z >= z_start
+    if above is None:
+        raise ValueError("no geometry at or above the section start")
+    section = _slice_keep(above, -normal, _origin(ax, z_end))  # the slab itself
+    if section is None:
+        raise ValueError("the selected section is empty")
+    lower = _slice_keep(mesh, -normal, _origin(ax, z_start))   # z <= z_start
+
+    # Lift the whole upper part (its own copy of the section included) clear of
+    # the gap, then fill the gap with `copies` fresh copies of the section.
+    upper = above
+    upper.apply_translation(_origin(ax, copies * height))
+
+    pieces: list[trimesh.Trimesh] = []
+    if lower is not None:
+        pieces.append(lower)
+    for j in range(copies):
+        copy = section.copy()
+        copy.apply_translation(_origin(ax, j * height))
+        pieces.append(copy)
+    pieces.append(upper)
+
+    if not weld:
+        return trimesh.util.concatenate(pieces)
+
+    joined = trimesh.boolean.union(pieces)
+    if joined is None or joined.is_empty:
+        return trimesh.util.concatenate(pieces)
+    return joined
 
 
 def _origin(ax: int, value: float) -> np.ndarray:
