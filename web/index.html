@@ -78,18 +78,23 @@
           <div>
             <label>From Z (mm)</label>
             <input id="zStart" type="number" step="0.1" value="0">
+            <div class="seg zNudge" data-edge="start" style="margin-top:6px;">
+              <button data-du="-1">&minus;1U</button>
+              <button data-du="-0.5">&minus;&frac12;U</button>
+              <button data-du="0.5">+&frac12;U</button>
+              <button data-du="1">+1U</button>
+            </div>
           </div>
           <div>
             <label>To Z (mm)</label>
             <input id="zEnd" type="number" step="0.1" value="0">
+            <div class="seg zNudge" data-edge="end" style="margin-top:6px;">
+              <button data-du="-1">&minus;1U</button>
+              <button data-du="-0.5">&minus;&frac12;U</button>
+              <button data-du="0.5">+&frac12;U</button>
+              <button data-du="1">+1U</button>
+            </div>
           </div>
-        </div>
-        <label>Section size (Gridfinity 1U = 7 mm)</label>
-        <div class="seg" id="zNudge">
-          <button data-du="-7">&minus;1U</button>
-          <button data-du="-3.5">&minus;&frac12;U</button>
-          <button data-du="3.5">+&frac12;U</button>
-          <button data-du="7">+1U</button>
         </div>
         <div id="zReadout" style="font-size:11px;color:#9aa0ac;margin-top:6px;"></div>
         <div id="zCopiesWrap" style="display:none;">
@@ -261,14 +266,21 @@ document.querySelectorAll('#zOpSeg button').forEach(b =>
     clampInputs(); updateSlab();
   }));
 
-// Section-size nudge buttons: grow/shrink the section by a Gridfinity unit.
-document.querySelectorAll('#zNudge button').forEach(b =>
+// Per-edge nudge buttons: move From Z or To Z by Gridfinity-unit steps. Each
+// row nudges only its own edge, then clamps to the model bounds and the
+// opposite edge so the two never cross (no silent swap).
+document.querySelectorAll('.zNudge button').forEach(b =>
   b.addEventListener('click', () => {
     if (!meta) return;
-    const zEl = document.getElementById('zStart'), zEl2 = document.getElementById('zEnd');
-    let z0 = +zEl.value, z1 = +zEl2.value; if (z1 < z0) [z0, z1] = [z1, z0];
-    z1 = z1 + parseFloat(b.dataset.du);
-    zEl.value = z0.toFixed(2); zEl2.value = z1.toFixed(2);
+    const edge = b.parentElement.dataset.edge;
+    const lo = meta.min.z, hi = meta.min.z + meta.size.z;
+    const startEl = document.getElementById('zStart'), endEl = document.getElementById('zEnd');
+    const delta = parseFloat(b.dataset.du) * Z_UNIT;
+    if (edge === 'start') {
+      startEl.value = Math.min(Math.max(lo, +startEl.value + delta), +endEl.value).toFixed(2);
+    } else {
+      endEl.value = Math.max(Math.min(hi, +endEl.value + delta), +startEl.value).toFixed(2);
+    }
     clampInputs(); updateSlab();
   }));
 
